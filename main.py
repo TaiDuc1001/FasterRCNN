@@ -1,28 +1,46 @@
-import sys
-import os
 import torch
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from models.fasterrcnn import RegionProposalNetwork
-from torchvision import transforms
-from PIL import Image
+from models.fasterrcnn import TwoStageDetector
+
+def create_fake_image(batch_size, channels, height, width):
+    # Create a random tensor to simulate an image
+    return torch.randn(batch_size, channels, height, width)
 
 def main():
-    model = RegionProposalNetwork()
-    imgs = torch.randn(2, 3, 224, 224)  # Fake batch of 2 image tensors
-    feats = torch.randn(2, 512, 14, 14)  # Fake batch of 2 feature map tensors
-    targets = [
-        {
-            'bboxes': torch.tensor([[10, 10, 100, 100], [50, 50, 200, 200]]),
-            'labels': torch.tensor([1, 2])
-        },
-        {
-            'bboxes': torch.tensor([[30, 30, 150, 150]]),
-            'labels': torch.tensor([1])
-        }
-    ]
-    model.train()
-    output = model(imgs, feats, targets)
-    # print(output)
+    # Define image dimensions
+    batch_size = 1
+    channels = 3
+    height = 224
+    width = 224
+    
+    # Create a fake image
+    fake_image = create_fake_image(batch_size, channels, height, width)
+    
+    # Initialize the TwoStageDetector
+    img_size = (height, width)
+    out_size = (7, 7)
+    out_channels = 2048
+    n_classes = 91  
+    roi_size = (2, 2)
+    detector = TwoStageDetector(
+        img_size=img_size, 
+        out_size=out_size, 
+        out_channels=out_channels, 
+        n_classes=n_classes, 
+        roi_size=roi_size
+    )
+    
+    detector.eval()
+    # Perform inference
+    proposals_final, conf_scores_final, classes_final = detector.inference(
+        fake_image, 
+        nms_thresh=0.05, 
+        conf_thresh=0.1
+        )
+
+    # Print the results
+    print("Proposals:", proposals_final)
+    print("Confidence Scores:", conf_scores_final)
+    print("Classes:", classes_final)
 
 if __name__ == '__main__':
     main()
