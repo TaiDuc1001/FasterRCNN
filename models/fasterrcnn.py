@@ -4,24 +4,23 @@ from torchvision import ops
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.nn as nn
-
+from typing import List, Tuple, Union
 from utils.utils import *
-# -------------------- Models -----------------------
 
 class FeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
-        model = torchvision.models.resnet50(pretrained=True)
+        model = torchvision.models.resnet50(weights="DEFAULT")
         req_layers = list(model.children())[:8]
         self.backbone = nn.Sequential(*req_layers)
         for param in self.backbone.named_parameters():
             param[1].requires_grad = True
         
-    def forward(self, img_data):
+    def forward(self, img_data: torch.Tensor) -> torch.Tensor:
         return self.backbone(img_data)
     
 class ProposalModule(nn.Module):
-    def __init__(self, in_features, hidden_dim=512, n_anchors=9, p_dropout=0.3):
+    def __init__(self, in_features: int, hidden_dim: int = 512, n_anchors: int = 9, p_dropout: float = 0.3):
         super().__init__()
         self.n_anchors = n_anchors
         self.conv1 = nn.Conv2d(in_features, hidden_dim, kernel_size=3, padding=1)
@@ -29,8 +28,33 @@ class ProposalModule(nn.Module):
         self.conf_head = nn.Conv2d(hidden_dim, n_anchors, kernel_size=1)
         self.reg_head = nn.Conv2d(hidden_dim, n_anchors * 4, kernel_size=1)
         
-    def forward(self, feature_map, pos_anc_ind=None, neg_anc_ind=None, pos_anc_coords=None):
-        # determine mode
+    def forward(self, 
+                feature_map: torch.Tensor, 
+                pos_anc_ind=None, 
+                neg_anc_ind=None, 
+                pos_anc_coords=None) -> Union[
+                    Tuple[torch.Tensor, torch.Tensor], 
+                    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+                ]:
+        '''
+        Forward pass for the proposal module
+        Args:
+            feature_map: torch.Tensor - input feature map from the backbone
+            pos_anc_ind: torch.Tensor - indices of positive anchors
+            neg_anc_ind: torch.Tensor - indices of negative anchors
+            pos_anc_coords: torch.Tensor - coordinates of positive anchors
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor] - conf_scores_pred, reg_offsets_pred
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] - conf_scores_pos, conf_scores_neg, offsets_pos, proposals
+        Local variables shape:
+            out: torch.Tensor shape (B, hidden_dim, hmap, wmap) - output of the first convolutional layer
+            reg_offsets_pred: torch.Tensor shape (B, A*4, hmap, wmap) - predicted offsets for anchors
+            conf_scores_pred: torch.Tensor shape (B, A, hmap, wmap) - predicted conf scores for anchors
+            conf_scores_pos: torch.Tensor shape (N, ) - conf scores for positive anchors
+            conf_scores_neg: torch.Tensor shape (N, ) - conf scores for negative anchors
+            offsets_pos: torch.Tensor shape (N, 4) - offsets for positive anchors
+            proposals: torch.Tensor shape (N, 4) - proposals generated using offsets
+        '''
         if pos_anc_ind is None or neg_anc_ind is None or pos_anc_coords is None:
             mode = 'eval'
         else:
@@ -57,7 +81,7 @@ class ProposalModule(nn.Module):
             return conf_scores_pred, reg_offsets_pred
         
 class RegionProposalNetwork(nn.Module):
-    def __init__(self, img_size, out_size, out_channels):
+    def __init__(self, img_size: Tuple[int, int], out_size: Tuple[int, int], out_channels: int):
         super().__init__()
         
         self.img_height, self.img_width = img_size
@@ -83,7 +107,42 @@ class RegionProposalNetwork(nn.Module):
         self.feature_extractor = FeatureExtractor()
         self.proposal_module = ProposalModule(out_channels, n_anchors=self.n_anc_boxes)
         
-    def forward(self, images, gt_bboxes, gt_classes):
+    def forward(self, 
+                images: torch.Tensor, 
+                gt_bboxes: torch.Tensor, 
+                gt_classes: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        '''
+        Forward pass for the Region Proposal Network
+        Args:
+            images: torch.Tensor - input images
+            gt_bboxes: torch.Tensor - ground truth bounding boxes
+            gt_classes: torch.Tensor - ground truth classes
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] - total_rpn_loss, feature_map, proposals, positive_anc_ind_sep, GT_class_pos
+        Local variables shape:
+            batch_size: int - number of samples in the batch
+            feature_map: torch.Tensor shape (B, C, H, W) - output feature map from the backbone
+            anc_pts_x: torch.Tensor shape (W, ) - x-coordinates of anchor points
+            anc_pts_y: torch.Tensor shape (H, ) - y-coordinates of anchor points
+            anc_base: torch.Tensor shape (A, 4, H, W) - base anchor boxes
+            anc_boxes_all: torch.Tensor shape (B, A, 4, H, W) - all anchor boxes for each image
+            gt_bboxes_proj: torch.Tensor shape (B, N, 4) - projected ground truth boxes
+            positive_anc_ind: torch.Tensor shape (N, ) - indices of positive anchors
+            negative_anc_ind: torch.Tensor shape (N, ) - indices of negative anchors
+            GT_conf_scores: torch.Tensor shape (N, ) - ground truth confidence scores
+            GT_offsets: torch.Tensor shape (N, 4) - ground truth offsets
+            GT_class_pos: torch.Tensor shape (N, ) - ground truth classes for positive anchors
+            positive_anc_coords: torch.Tensor shape (N, 4) - coordinates of positive anchors
+            negative_anc_coords: torch.Tensor shape (N, 4) - coordinates of negative anchors
+            positive_anc_ind_sep: torch.Tensor shape (N, ) - indices of positive anchors separated by image
+            conf_scores_pos: torch.Tensor shape (N, ) - confidence scores for positive anchors
+            conf_scores_neg: torch.Tensor shape (N, ) - confidence scores for negative anchors
+            offsets_pos: torch.Tensor shape (N, 4) - offsets for positive anchors
+            proposals: torch.Tensor shape (N, 4) - proposals generated using offsets
+            cls_loss: torch.Tensor - classification loss
+            reg_loss: torch.Tensor - regression loss
+            total_rpn_loss: torch.Tensor - total RPN loss
+        '''
         batch_size = images.size(dim=0)
         feature_map = self.feature_extractor(images)
         
@@ -110,7 +169,30 @@ class RegionProposalNetwork(nn.Module):
         
         return total_rpn_loss, feature_map, proposals, positive_anc_ind_sep, GT_class_pos
     
-    def inference(self, images, conf_thresh=0.5, nms_thresh=0.7):
+    def inference(self, 
+                  images: torch.Tensor, 
+                  conf_thresh: float = 0.5, 
+                  nms_thresh: float = 0.7) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+        '''
+        Inference for the Region Proposal Network
+        Args:
+            images: torch.Tensor - input images
+            conf_thresh: float - confidence threshold
+            nms_thresh: float - NMS threshold
+        Returns:
+            Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]] - proposals_final, conf_scores_final, feature_map
+        Local variables shape:
+            batch_size: int - number of samples in the batch
+            feature_map: torch.Tensor shape (B, C, H, W) - output feature map from the backbone
+            anc_pts_x: torch.Tensor shape (W, ) - x-coordinates of anchor points
+            anc_pts_y: torch.Tensor shape (H, ) - y-coordinates of anchor points
+            anc_base: torch.Tensor shape (A, 4, H, W) - base anchor boxes
+            anc_boxes_all: torch.Tensor shape (B, A, 4, H, W) - all anchor boxes for each image
+            conf_scores_pred: torch.Tensor shape (B, A, H, W) - predicted conf scores for anchors
+            offsets_pred: torch.Tensor shape (B, A*4, H, W) - predicted offsets for anchors
+            proposals_final: List[torch.Tensor] - final proposals for each image
+            conf_scores_final: List[torch.Tensor] - confidence scores for each proposal
+        '''
         with torch.no_grad():
             batch_size = images.size(dim=0)
             feature_map = self.feature_extractor(images)
@@ -149,7 +231,12 @@ class RegionProposalNetwork(nn.Module):
         return proposals_final, conf_scores_final, feature_map
     
 class ClassificationModule(nn.Module):
-    def __init__(self, out_channels, n_classes, roi_size, hidden_dim=512, p_dropout=0.3):
+    def __init__(self, 
+                 out_channels: int, 
+                 n_classes: int, 
+                 roi_size: Tuple[int, int], 
+                 hidden_dim: int = 512, 
+                 p_dropout: float = 0.3):
         super().__init__()        
         self.roi_size = roi_size
         # hidden network
@@ -160,8 +247,24 @@ class ClassificationModule(nn.Module):
         # define classification head
         self.cls_head = nn.Linear(hidden_dim, n_classes)
         
-    def forward(self, feature_map, proposals_list, gt_classes=None):
-        
+    def forward(self, 
+                feature_map: torch.Tensor, 
+                proposals_list: List[torch.Tensor], 
+                gt_classes: torch.Tensor = None) -> Union[torch.Tensor, torch.Tensor]:
+        '''
+        Forward pass for the Classification Module
+        Args:
+            feature_map: torch.Tensor - input feature map
+            proposals_list: List[torch.Tensor] - list of proposals for each image
+            gt_classes: torch.Tensor - ground truth classes
+        Returns:
+            Union[torch.Tensor, torch.Tensor] - cls_scores, cls_loss
+        Local variables shape:
+            roi_out: torch.Tensor shape (N, C, roi_size, roi_size) - output from ROI pooling
+            out: torch.Tensor shape (N, hidden_dim) - output from hidden network
+            cls_scores: torch.Tensor shape (N, n_classes) - classification scores
+            cls_loss: torch.Tensor - classification loss
+        '''
         if gt_classes is None:
             mode = 'eval'
         else:
@@ -190,12 +293,38 @@ class ClassificationModule(nn.Module):
         return cls_loss
     
 class TwoStageDetector(nn.Module):
-    def __init__(self, img_size, out_size, out_channels, n_classes, roi_size):
+    def __init__(self, 
+                 img_size: Tuple[int, int], 
+                 out_size: Tuple[int, int], 
+                 out_channels: int, 
+                 n_classes: int, 
+                 roi_size: Tuple[int, int]):
         super().__init__() 
         self.rpn = RegionProposalNetwork(img_size, out_size, out_channels)
         self.classifier = ClassificationModule(out_channels, n_classes, roi_size)
         
-    def forward(self, images, gt_bboxes, gt_classes):
+    def forward(self, 
+                images: torch.Tensor, 
+                gt_bboxes: torch.Tensor, 
+                gt_classes: torch.Tensor) -> torch.Tensor:
+        '''
+        Forward pass for the Two Stage Detector
+        Args:
+            images: torch.Tensor - input images
+            gt_bboxes: torch.Tensor - ground truth bounding boxes
+            gt_classes: torch.Tensor - ground truth classes
+        Returns:
+            torch.Tensor - total_loss
+        Local variables shape:
+            total_rpn_loss: torch.Tensor - total RPN loss
+            feature_map: torch.Tensor shape (B, C, H, W) - output feature map from the backbone
+            proposals: torch.Tensor shape (N, 4) - proposals generated by the RPN
+            positive_anc_ind_sep: torch.Tensor shape (N, ) - indices of positive anchors separated by image
+            GT_class_pos: torch.Tensor shape (N, ) - ground truth classes for positive anchors
+            pos_proposals_list: List[torch.Tensor] - list of proposals for each image
+            cls_loss: torch.Tensor - classification loss
+            total_loss: torch.Tensor - total loss
+        '''
         total_rpn_loss, feature_map, proposals, \
         positive_anc_ind_sep, GT_class_pos = self.rpn(images, gt_bboxes, gt_classes)
         
@@ -212,7 +341,27 @@ class TwoStageDetector(nn.Module):
         
         return total_loss
     
-    def inference(self, images, conf_thresh=0.5, nms_thresh=0.7):
+    def inference(self, 
+                  images: torch.Tensor, 
+                  conf_thresh: float, 
+                  nms_thresh: float) -> Tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor]:
+        '''
+        Inference for the Two Stage Detector
+        Args:
+            images: torch.Tensor - input images
+            conf_thresh: float - confidence threshold
+            nms_thresh: float - NMS threshold
+        Returns:
+            Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]] - proposals_final, conf_scores_final, classes_final
+        Local variables shape:
+            batch_size: int - number of samples in the batch
+            proposals_final: List[torch.Tensor] - final proposals for each image
+            conf_scores_final: List[torch.Tensor] - confidence scores for each proposal
+            cls_scores: torch.Tensor shape (B, N, n_classes) - classification scores
+            cls_probs: torch.Tensor shape (B, N, n_classes) - classification probabilities
+            classes_all: torch.Tensor shape (B, N) - classes with highest probability
+            classes_final: List[torch.Tensor] - final classes for each image
+        '''
         batch_size = images.size(dim=0)
         proposals_final, conf_scores_final, feature_map = self.rpn.inference(images, conf_thresh, nms_thresh)
         cls_scores = self.classifier(feature_map, proposals_final)
