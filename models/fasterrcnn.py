@@ -235,7 +235,7 @@ class ClassificationModule(nn.Module):
                  out_channels: int, 
                  n_classes: int, 
                  roi_size: Tuple[int, int], 
-                 hidden_dim: int = 512, 
+                 hidden_dim: int = 1024, 
                  p_dropout: float = 0.3):
         super().__init__()        
         self.roi_size = roi_size
@@ -344,7 +344,7 @@ class TwoStageDetector(nn.Module):
     def inference(self, 
                   images: torch.Tensor, 
                   conf_thresh: float, 
-                  nms_thresh: float) -> Tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor]:
+                  nms_thresh: float) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
         '''
         Inference for the Two Stage Detector
         Args:
@@ -352,34 +352,45 @@ class TwoStageDetector(nn.Module):
             conf_thresh: float - confidence threshold
             nms_thresh: float - NMS threshold
         Returns:
-            Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]] - proposals_final, conf_scores_final, classes_final
+            Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]] - proposals_final, conf_scores_final, classes_final, probabs_final, embeddings_final
         Local variables shape:
             batch_size: int - number of samples in the batch
             proposals_final: List[torch.Tensor] - final proposals for each image
             conf_scores_final: List[torch.Tensor] - confidence scores for each proposal
-            cls_scores: torch.Tensor shape (B, N, n_classes) - classification scores
-            cls_probs: torch.Tensor shape (B, N, n_classes) - classification probabilities
-            classes_all: torch.Tensor shape (B, N) - classes with highest probability
-            classes_final: List[torch.Tensor] - final classes for each image
+            feature_map: torch.Tensor shape (B, C, H, W) - output feature map from the backbone
+            roi_out: torch.Tensor shape (N, C, roi_size, roi_size) - output from ROI pooling
+            out: torch.Tensor shape (N, hidden_dim) - output from hidden network
+            cls_scores: torch.Tensor shape (N, n_classes) - classification scores
+            cls_probs: torch.Tensor shape (N, n_classes) - class probabilities
+            classes_all: torch.Tensor shape (N, ) - predicted classes
+            classes_final: List[torch.Tensor] - predicted classes for each image
+            probabs_final: List[torch.Tensor] - class probabilities for each image
+            embeddings_final: List[torch.Tensor] - embeddings for each image
         '''
         batch_size = images.size(dim=0)
         proposals_final, conf_scores_final, feature_map = self.rpn.inference(images, conf_thresh, nms_thresh)
-        cls_scores = self.classifier(feature_map, proposals_final)
-        
-        # convert scores into probability
+
+        roi_out = ops.roi_pool(feature_map, proposals_final, self.classifier.roi_size)
+        roi_out = self.classifier.avg_pool(roi_out)
+        roi_out = roi_out.squeeze(-1).squeeze(-1)
+        out = self.classifier.fc(roi_out)
+        out = F.relu(self.classifier.dropout(out))
+        cls_scores = self.classifier.cls_head(out)
         cls_probs = F.softmax(cls_scores, dim=-1)
-        # get classes with highest probability
         classes_all = torch.argmax(cls_probs, dim=-1)
         
         classes_final = []
-        # slice classes to map to their corresponding image
+        probabs_final = []
+        embeddings_final = []
         c = 0
         for i in range(batch_size):
-            n_proposals = len(proposals_final[i]) # get the number of proposals for each image
+            n_proposals = len(proposals_final[i])
             classes_final.append(classes_all[c: c+n_proposals])
+            probabs_final.append(cls_probs[c: c+n_proposals])
+            embeddings_final.append(out[c: c+n_proposals])
             c += n_proposals
             
-        return proposals_final, conf_scores_final, classes_final
+        return proposals_final, conf_scores_final, classes_final, probabs_final, embeddings_final
 
 # ------------------- Loss Utils ----------------------
 
