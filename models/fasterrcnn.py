@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.nn as nn
 from typing import List, Tuple, Union
-from utils.utils import *
+from models.utils import *
 
 class FeatureExtractor(nn.Module):
     def __init__(self):
